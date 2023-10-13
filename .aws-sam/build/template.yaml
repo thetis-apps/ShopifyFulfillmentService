@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: ShopifyIntegration
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: thetis-ims-shopify-integration
+    Description: Application for integration of Thetis IMS with Shopify
+    Author: thetis-apps
+    SpdxLicenseId: Apache-2.0
+    LicenseUrl: ../../LICENSE.txt
+    ReadmeUrl: ../../README.md
+    Labels:
+    - thetis-ims
+    HomePageUrl: https://github.com/thetis-apps/ShopifyIntegration
+    SemanticVersion: '0.0.0'
+    SourceCodeUrl: https://github.com/thetis-apps/ShopifyIntegration
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: nodejs16.x
+Parameters:
+  ContextId:
+    Type: String
+    Description: Number of the context where this application is installed.
+    MinLength: '1'
+  ClientId:
+    Description: Key of the parameter that has your Thetis client id as its value.
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: ThetisClientId
+  ClientSecret:
+    Description: Key of the parameter that has your Thetis client secret as its value.
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: ThetisClientSecret
+  WebAcl:
+    Description: Key of the parameter that has a WAF to use for publicly exposed endpoints
+      as its value
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: ThetisWebAcl
+  ApiKey:
+    Description: The api key that gives access to the context in Thetis IMS.
+    Type: String
+    MinLength: 1
+  DevOpsEmail:
+    Description: The email address to send mail to when messages in the dead letter
+      queue.
+    Type: String
+    MinLength: 4
+Resources:
+  InitResource:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken:
+        Fn::GetAtt:
+        - InitializeFunction
+        - Arn
+      Version: 3
+  InitializeFunction:
+    Type: AWS::Serverless::Function
+    DeletionPolicy: Delete
+    Properties:
+      Handler: src/handler.initializer
+      MemorySize: 2048
+      Timeout: 30
+      Environment:
+        Variables:
+          ClientId:
+            Ref: ClientId
+          ClientSecret:
+            Ref: ClientSecret
+          ApiKey:
+            Ref: ApiKey
+      CodeUri: InitializeFunction
+    Metadata:
+      SamResourceId: InitializeFunction
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 14
+  Api:
+    Type: AWS::Serverless::Api
+    Properties:
+      OpenApiVersion: 3.0.1
+      StageName: v1
+      AccessLogSetting:
+        DestinationArn:
+          Fn::GetAtt:
+          - LogGroup
+          - Arn
+        Format: $context.identity.sourceIp,$context.identity.caller,$context.identity.user,$context.requestTime,$context.httpMethod,$context.resourcePath,$context.protocol,$context.status,$context.responseLength,$context.requestId,$context.extendedRequestId
+      TracingEnabled: true
+      MethodSettings:
+      - LoggingLevel: ERROR
+        ResourcePath: /*
+        HttpMethod: '*'
+        MetricsEnabled: false
+  WebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn:
+        Fn::Sub: arn:aws:apigateway:${AWS::Region}::/restapis/${Api}/stages/${Api.Stage}
+      WebACLArn:
+        Ref: WebAcl
+  Webhook:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Function to queue webhook calls
+      Handler: src/handler.webhook
+      Timeout: 30
+      Policies:
+      - AmazonSQSFullAccess
+      Environment:
+        Variables:
+          ClientId:
+            Ref: ClientId
+          ClientSecret:
+            Ref: ClientSecret
+          ApiKey:
+            Ref: ApiKey
+          OrderQueue:
+            Ref: ShopifyEventQueue
+      Events:
+        Invocation:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: Api
+            Method: POST
+            Path: /
+      CodeUri: Webhook
+    Metadata:
+      SamResourceId: Webhook
+  FulfilmentOrderNotification:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Function for Shopify to call IMS.
+      Handler: src/handler.fulfillmentOrderNotification
+      Timeout: 30
+      Environment:
+        Variables:
+          OrderQueue:
+            Ref: ShopifyEventQueue
+      Events:
+        Invocation:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: Api
+            Method: POST
+            Path: /fulfillment_order_notification
+      CodeUri: FulfilmentOrderNotification
+    Metadata:
+      SamResourceId: FulfilmentOrderNotification
+  ShopifyEventQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      KmsMasterKeyId: alias/aws/sqs
+      RedrivePolicy:
+        deadLetterTargetArn:
+          Fn::GetAtt:
+          - DeadLetterQueue
+          - Arn
+        maxReceiveCount: 3
+      VisibilityTimeout: 60
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+Outputs:
+  Api:
+    Description: API Gateway endpoint URL for webhook
+    Value:
+      Fn::Sub: https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${Api.Stage}

@@ -1,0 +1,19 @@
+{
+    "version": "0",
+    "id": "9a146bb9-4b8e-9ee0-63c2-58dd0d5a7777",
+    "detail-type": "availableStockChanged",
+    "source": "public.thetis-ims.com",
+    "account": "170069103691",
+    "time": "2021-05-19T08:45:59Z",
+    "region": "eu-west-1",
+    "resources": [],
+    "detail": {
+        "globalTradeItemId": 68788234,
+        "eventId": "8e2bce27-5400-4997-8fec-5c1a2112a626",
+        "delta": 100,
+        "subscriberId": "379",
+        "contextId": "601",
+        "eventType": "availableStockChanged",
+        "userId": 32935249
+    }
+}

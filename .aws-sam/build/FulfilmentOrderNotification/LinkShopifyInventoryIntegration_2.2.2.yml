@@ -1,0 +1,171 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: LinkShopifyInventoryIntegration
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: thetis-ims-link-shopify-inventory-integration
+    Description: Application for integration of Thetis IMS with Shopify
+    Author: thetis-apps
+    SpdxLicenseId: Apache-2.0
+    LicenseUrl: s3://aws-sam-cli-managed-default-samclisourcebucket-1q52gionhjeg3/4612b8d5aa75b9b9936c9b7b9e6c7e82
+    ReadmeUrl: s3://aws-sam-cli-managed-default-samclisourcebucket-1q52gionhjeg3/98882ff62ca6a64ef97c2501832c6cc8
+    Labels:
+    - thetis-ims
+    HomePageUrl: https://github.com/thetis-apps/LinkShopifyInventoryIntegration
+    SemanticVersion: 2.2.2
+    SourceCodeUrl: https://github.com/thetis-apps/LinkShopifyInventoryIntegration
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: nodejs16.x
+Parameters:
+  ContextId:
+    Type: String
+    Description: Number of the context where this application is installed.
+    MinLength: '1'
+  SellerNumber:
+    Type: String
+    Description: Number of the sales channel that this shop is depicted as.
+    MinLength: '1'
+  ClientId:
+    Description: Key of the parameter that has your Thetis client id as its value.
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: ThetisClientId
+  ClientSecret:
+    Description: Key of the parameter that has your Thetis client secret as its value.
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: ThetisClientSecret
+  ApiKey:
+    Description: The api key that gives access to the context in Thetis IMS.
+    Type: String
+    MinLength: 1
+  DevOpsEmail:
+    Description: The email address to send mail to when messages in the dead letter
+      queue.
+    Type: String
+    MinLength: 4
+Resources:
+  StockChangedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+        - public.thetis-ims.com
+        detail-type:
+        - availableStockChanged
+        detail:
+          contextId:
+          - Ref: ContextId
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - StockChangedQueue
+          - Arn
+        Id: EventTarget
+        SqsParameters:
+          MessageGroupId: SINGLETON
+    Metadata:
+      SamResourceId: StockChangedRule
+  StockChangedPermission:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+      - Ref: StockChangedQueue
+      PolicyDocument:
+        Statement:
+        - Action: SQS:SendMessage
+          Effect: Allow
+          Resource:
+            Fn::GetAtt:
+            - StockChangedQueue
+            - Arn
+          Principal:
+            Service: events.amazonaws.com
+    Metadata:
+      SamResourceId: StockChangedPermission
+  StockChangedQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      RedrivePolicy:
+        deadLetterTargetArn:
+          Fn::GetAtt:
+          - DeadLetterQueue
+          - Arn
+        maxReceiveCount: 3
+      VisibilityTimeout: 60
+    Metadata:
+      SamResourceId: StockChangedQueue
+  StockChangeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handler.stockChanged
+      Environment:
+        Variables:
+          ClientId:
+            Ref: ClientId
+          ClientSecret:
+            Ref: ClientSecret
+          ApiKey:
+            Ref: ApiKey
+          SellerNumber:
+            Ref: SellerNumber
+      Events:
+        StockChanged:
+          Type: SQS
+          Properties:
+            Queue:
+              Fn::GetAtt:
+              - StockChangedQueue
+              - Arn
+            BatchSize: 1
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-1q52gionhjeg3/9549982f3cd33ec27a4357017998e4e1
+    Metadata:
+      SamResourceId: StockChangeFunction
+  ListProductsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handler.listProducts
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-1q52gionhjeg3/9549982f3cd33ec27a4357017998e4e1
+    Metadata:
+      SamResourceId: ListProductsFunction
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+    Metadata:
+      SamResourceId: DeadLetterQueue
+  Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alarm when any message is moved to the dead letter queue.
+      AlarmActions:
+      - Ref: IncidentTopic
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      MetricName: ApproximateNumberOfMessagesVisible
+      Period: 60
+      Namespace: AWS/SQS
+      Threshold: '0'
+      Unit: Count
+      Dimensions:
+      - Name: QueueName
+        Value:
+          Fn::GetAtt:
+          - DeadLetterQueue
+          - QueueName
+      TreatMissingData: notBreaching
+      Statistic: Maximum
+    Metadata:
+      SamResourceId: Alarm
+  IncidentTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+      - Endpoint:
+          Ref: DevOpsEmail
+        Protocol: email
+      DisplayName: Incidents to be handled by Devops.
+    Metadata:
+      SamResourceId: IncidentTopic
